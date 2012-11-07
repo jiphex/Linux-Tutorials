@@ -1,0 +1,63 @@
+---
+title: Heinous uses for Device Mapper
+layout: post
+---
+
+I recently ended up in an odd [situation][serverfault-question], however it taught me something fun about the Linux Device mapper which, although it should probably never be deployed in production, is an interesting novelty which shows how flexible Linux can be in terms of block devices.
+
+To summarise the ServerFault post, the problem is this:
+
+> You have a large Linux logical volume, which doesn't have a partition 
+> table, and is just formatted with a filesystem.
+>
+> You want to present the block device as a drive to an application running
+> on the same server, which for some reason (read: Windows KVM guest) cannot
+> understand partition-less volumes.
+>
+> Also, you've already used the volume to store a non-trivial amount of data,
+> which you'd rather not have to do again from scratch.
+
+In an ideal world, Windows would be able to read the size of the volume, notice that it contains a filesystem and use it as if it were a normal drive, but this isn't the case.
+
+So the obvious solution (maybe?) is to just provide a partition table, and hope that it works.
+
+Unfortunately, block devices have an inherent order, and the two common partition tables in use today require that the partition table header (a few bytes-few KBytes of data which describe the layout of partitions on the disk) be located at the *start* of a volume.
+
+It's not possible to just add space at the start of a LVM volume in Linux, you can extend a volume by adding space at the end, but this isn't particularly helpful. You could go over the device block by block from the end, shifting all the data back N sectors to make space at the start, but this isn't really feasible with large amounts of data.
+
+Fortunately, Linux provides us with [Device Mapper][dm-wikipedia], a framework which is used by software such as LVM itself, kpartx and the Linux Multipath drivers. It's possible to [manipulate][dmsetup-manpage] device mapper to our own devious ends, to create virtual block devices out of magic.
+
+In this case, our use case is fairly trivial:
+
+ * We need some space at the start of the volume to contain the partition table
+ * *On the same volume* we need to present the actual data that we're trying to access
+ 
+Actually doing this in practice isn't too difficult (presuming /dev/vgstuff/data is the formatted logical volume containing our data):
+
+    [root@server]# dd if=/dev/zero of=/root/gpt.bin bs=68K count=1
+    [root@server]# losetup -f /root/gpt.bin
+    [root@server]# cat > /root/dmap.txt
+    0 128 linear /dev/loop0 0
+    128 2099200 linear /dev/vgstuff/data 0
+    ^D
+    [root@server]# cat dmap | dmsetup create compositedevice
+    
+This should create a composite block device (the name can be whatever you want instead of just 'compositedevice') in /dev/mapper/compositedevice, which should contain a blank file for the first 68K, then after that the Logical volume.
+
+The file should be readable and writable as long as the underlying volumes are. You can remove it with `dmsetup remove` and see details with `dmsetup info` or `dmsetup status`. Errors go to `dmesg`.
+
+All you need to do now<sup>1</sup>, is to create a partition table inside the area at the start of the file, I did this using `testdisk`, which is capable of searching through the volume itself for the filesystem headers, and creating a partition table which matches the actual data on disk. Write this, export the /dev/mapper device and you're done!
+
+In my case, I had to use a GPT partition table due to the size of the volume in question, but this is even easier with an MBR partition table. Instead of making an arbitrarily large (68K in the above case) partition table file, the MBR will always be 512 bytes long, so you can take advantage of that (as long as your volume itself is &lt;4TB).
+
+## Notes
+
+1) It should be possible to not use test disk, and instead do the following:
+
+* Create a sparse file the same size (or slightly bigger than) your target volume
+* Use parted (+ maths) to create a partition label and add a partition which starts and ends at the same places (including the offset caused by your scratch GPT table) as the eventual volume will sit
+* Export this partition table (backup in parted or work out how big it is and use dd) and write it straight over your gpt.bin file
+
+[serverfault-question]: http://serverfault.com/questions/445895/can-windows-read-an-unpartitioned-ntfs-volume-single-large-partition)
+[dm-wikipedia]: http://en.wikipedia.org/wiki/Device_mapper
+[dmsetup-manpage]: http://linux.die.net/man/8/dmsetup
