@@ -1,3 +1,4 @@
 safe: true
 auto: false
 server: false
+base_url: '/Linux-Tutorials'
