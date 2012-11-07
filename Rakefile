@@ -17,5 +17,5 @@ end
 desc "run server"
 task :server => :delete do
   puts "running server"
-  system "jekyll --server --auto"
+  system "jekyll --server --base-url '' --auto"
 end
